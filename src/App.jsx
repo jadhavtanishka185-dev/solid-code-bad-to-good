@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from "react";
+import { createOrder, refundOrder } from "./services/orderService.js";
+import { isPaymentMethodSupported, processPayment } from "./services/paymentService.js";
+import { loadOrders, saveOrders } from "./adapters/storageAdapter.js";
+import { exportOrdersCsv, calculateRevenue } from "./services/reportService.js";
+import { notifyExternalOrder, notifyUser, buildOrderMessage } from "./adapters/notificationAdapter.js";
+import { downloadCsv } from "./adapters/exportAdapter.js";
 
-// INTENTIONALLY BAD: massive component with UI + business logic + infra + reports + notifications + storage.
 export default function App() {
   const [user, setUser] = useState("vip");
   const [item, setItem] = useState("laptop");
@@ -10,95 +15,53 @@ export default function App() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const stored = localStorage.getItem("orders");
-    if (stored) setOrders(JSON.parse(stored));
+    setOrders(loadOrders());
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("orders", JSON.stringify(orders));
+    saveOrders(orders);
   }, [orders]);
 
-  function buyNow() {
-    let price = 20;
-    if (item === "laptop") price = 1000;
-    else if (item === "phone") price = 500;
-    else if (item === "headset") price = 50;
-
-    let total = price * Number(qty);
-    if (user === "vip") total *= 0.7;
-    else if (Number(qty) > 10) total *= 0.85;
-
-    if (payment === "card") {
-      console.log("Calling card gateway directly");
-    } else if (payment === "paypal") {
-      console.log("Calling paypal API directly");
-    } else if (payment === "cod") {
-      console.log("Cash on delivery");
-    } else {
-      setMessage("Payment failed");
+  async function buyNow() {
+    if (!isPaymentMethodSupported(payment)) {
+      setMessage("Unsupported payment method");
       return;
     }
 
-    const newOrder = {
-      id: Date.now(),
-      user,
-      item,
-      qty: Number(qty),
-      total,
-      status: "PLACED"
-    };
+    try {
+      await processPayment(payment);
 
-    setOrders([...orders, newOrder]);
+      const newOrder = createOrder({ user, item, qty });
+      const nextOrders = [...orders, newOrder];
 
-    // fake external side effects inside UI
-    fetch("https://httpbin.org/post", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: `${user}@mail.com`, text: `Order ${newOrder.id} confirmed` })
-    }).catch(() => {});
-
-    alert(`SMS to ${user}: Order ${newOrder.id} placed`);
-
-    setMessage(`Order ${newOrder.id} placed. Total: ${total}`);
+      setOrders(nextOrders);
+      notifyExternalOrder({ user, orderId: newOrder.id });
+      notifyUser(`SMS to ${user}: Order ${newOrder.id} placed`);
+      setMessage(buildOrderMessage({ user, orderId: newOrder.id, total: newOrder.total }));
+    } catch (error) {
+      setMessage(error?.message ?? "Payment failed");
+    }
   }
 
   function refund(orderId) {
-    const next = orders.map((o) => {
-      if (o.id === orderId && o.status !== "REFUNDED") {
-        return { ...o, status: "REFUNDED" };
-      }
-      return o;
-    });
-    setOrders(next);
+    setOrders(refundOrder(orders, orderId));
     setMessage(`Refund attempted for ${orderId}`);
   }
 
   function exportReport() {
-    let revenue = 0;
-    const lines = ["id,user,item,qty,total,status"];
-
-    orders.forEach((o) => {
-      if (o.status !== "REFUNDED") revenue += o.total;
-      lines.push(`${o.id},${o.user},${o.item},${o.qty},${o.total},${o.status}`);
-    });
-
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "orders_export.csv";
-    a.click();
-
-    setMessage(`Revenue: ${revenue}`);
+    const csv = exportOrdersCsv(orders);
+    downloadCsv(csv, "orders_export.csv");
+    setMessage(`Revenue: ${calculateRevenue(orders)}`);
   }
 
   return (
     <div className="page">
-      <h1>Bad Commerce Admin</h1>
-      <p>Intentionally bad architecture for SOLID refactoring exercise.</p>
+      <h1>Commerce Admin</h1>
+      <p>Refactored architecture with focused services and adapters.</p>
 
       <div className="card">
         <h2>Create Order</h2>
+
         <label>User</label>
         <input value={user} onChange={(e) => setUser(e.target.value)} />
 
@@ -139,16 +102,16 @@ export default function App() {
             </tr>
           </thead>
           <tbody>
-            {orders.map((o) => (
-              <tr key={o.id}>
-                <td>{o.id}</td>
-                <td>{o.user}</td>
-                <td>{o.item}</td>
-                <td>{o.qty}</td>
-                <td>{o.total}</td>
-                <td>{o.status}</td>
+            {orders.map((order) => (
+              <tr key={order.id}>
+                <td>{order.id}</td>
+                <td>{order.user}</td>
+                <td>{order.item}</td>
+                <td>{order.qty}</td>
+                <td>{order.total}</td>
+                <td>{order.status}</td>
                 <td>
-                  <button onClick={() => refund(o.id)}>Refund</button>
+                  <button onClick={() => refund(order.id)}>Refund</button>
                 </td>
               </tr>
             ))}
